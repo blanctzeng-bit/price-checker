@@ -103,4 +103,171 @@ def search_momo(keyword, target_unit):
       if match_json:
         try:
           data = json.loads(match_json.group(1))
-          prods =
+          prods = (
+              data.get("props", {})
+              .get("pageProps", {})
+              .get("goodsInfo", {})
+              .get("goodsList", [])
+          )
+          for p in prods[:6]:
+            p_name = p.get("goodsName", "")
+            p_price = float(p.get("salePrice") or p.get("price", 0))
+            if p_name and p_price > 0:
+              spec = parse_specification("", p_name)
+              if spec["unit"] == target_unit:
+                unit_price = (
+                    round(p_price / spec["total_volume"], 2)
+                    if spec["total_volume"] > 0
+                    else p_price
+                )
+                g_code = p.get("goodsCode", "")
+                results.append({
+                    "title": p_name,
+                    "price": p_price,
+                    "unit_price": unit_price,
+                    "url": (
+                        f"https://m.momoshop.com.tw/goods.momo?i_code={g_code}"
+                    ),
+                })
+        except Exception:
+          pass
+
+      if not results:
+        soup = BeautifulSoup(res.text, "html.parser")
+        items = (
+            soup.select("li.goodsItemLi")
+            or soup.select(".prdList li")
+            or soup.select("article.prdItem")
+        )
+        for item in items[:6]:
+          title_el = (
+              item.select_one(".prdName")
+              or item.select_one(".goodsName")
+              or item.select_one("h3")
+          )
+          price_el = (
+              item.select_one(".price")
+              or item.select_one(".prdPrice")
+              or item.select_one("b")
+          )
+          link_el = item.select_one("a")
+          if title_el and price_el:
+            p_name = title_el.text.strip()
+            price_match = re.search(r"[\d,]+", price_el.text)
+            if price_match:
+              p_price = float(price_match.group(0).replace(",", ""))
+              spec = parse_specification("", p_name)
+              if spec["unit"] == target_unit:
+                unit_price = (
+                    round(p_price / spec["total_volume"], 2)
+                    if spec["total_volume"] > 0
+                    else p_price
+                )
+                href = (
+                    link_el["href"] if link_el and link_el.get("href") else ""
+                )
+                item_url = (
+                    href
+                    if href.startswith("http")
+                    else f"https://m.momoshop.com.tw/{href.lstrip('/')}"
+                )
+                results.append({
+                    "title": p_name,
+                    "price": p_price,
+                    "unit_price": unit_price,
+                    "url": item_url,
+                })
+  except Exception:
+    pass
+  return min(results, key=lambda x: x["unit_price"]) if results else None
+
+
+def search_pchome(keyword, target_unit):
+  """搜尋 PChome 24h"""
+  url = f"https://ecshweb.pchome.com.tw/search/v3.3/all/results?q={urllib.parse.quote(keyword)}&page=1&sort=rnk/dc"
+  results = []
+  try:
+    res = requests.get(url, headers=PC_HEADERS, timeout=6)
+    if res.status_code == 200:
+      data = res.json()
+      for p in data.get("prods", [])[:5]:
+        p_name = p.get("name", "")
+        p_price = float(p.get("price", 0))
+        spec = parse_specification("", p_name)
+        if spec["unit"] == target_unit:
+          unit_price = (
+              round(p_price / spec["total_volume"], 2)
+              if spec["total_volume"] > 0
+              else p_price
+          )
+          p_id = p.get("Id", "")
+          results.append({
+              "title": p_name,
+              "price": p_price,
+              "unit_price": unit_price,
+              "url": f"https://24h.pchome.com.tw/prod/{p_id}",
+          })
+  except Exception:
+    pass
+  return min(results, key=lambda x: x["unit_price"]) if results else None
+
+
+def search_yahoo(keyword, target_unit):
+  """搜尋 Yahoo 購物中心"""
+  url = f"https://tw.buy.yahoo.com/search/product?p={urllib.parse.quote(keyword)}"
+  results = []
+  try:
+    res = requests.get(url, headers=PC_HEADERS, timeout=6)
+    if res.status_code == 200:
+      soup = BeautifulSoup(res.text, "html.parser")
+      items = (
+          soup.select("li[data-item-id]")
+          or soup.select("div.BaseGridItem__grid___2wuGy")
+          or soup.select(".sc-bwzfXH")
+      )
+      for item in items[:5]:
+        title_el = (
+            item.select_one(".BaseGridItem__title___2HWui")
+            or item.select_one("span[class*='title']")
+            or item.find("span")
+        )
+        price_el = (
+            item.select_one(".BaseGridItem__price___31jkj")
+            or item.select_one("em")
+        )
+        link_el = item.find("a")
+        if title_el and price_el:
+          p_name = title_el.text.strip()
+          price_match = re.search(r"[\d,]+", price_el.text)
+          if price_match:
+            p_price = float(price_match.group(0).replace(",", ""))
+            spec = parse_specification("", p_name)
+            if spec["unit"] == target_unit:
+              unit_price = (
+                  round(p_price / spec["total_volume"], 2)
+                  if spec["total_volume"] > 0
+                  else p_price
+              )
+              item_url = (
+                  link_el["href"]
+                  if link_el and "href" in link_el.attrs
+                  else ""
+              )
+              results.append({
+                  "title": p_name,
+                  "price": p_price,
+                  "unit_price": unit_price,
+                  "url": item_url,
+              })
+  except Exception:
+    pass
+  return min(results, key=lambda x: x["unit_price"]) if results else None
+
+
+# -----------------------------
+# 頁面主體邏輯
+# -----------------------------
+
+uploaded_file = st.file_uploader(
+    "請上傳 Excel 活動排程清單 (.xlsx)", type=["xlsx"]
+)
