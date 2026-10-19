@@ -10,16 +10,15 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="momo 競業單入比價工具", page_icon="🛒", layout="wide"
+    page_title="多平台競業單入比價工具", page_icon="🛒", layout="wide"
 )
 
-st.title("🛒 電商商品批次比價工具（以 momo 為主）")
+st.title("🛒 電商商品批次跨平台比價工具（momo / PChome / Yahoo）")
 st.markdown(
-    "專為 MD / 活動排程打造：支援多入組合拆解、每 ml/單入單價換算，優先比對"
-    " momo 購物網即時售價！"
+    "支援大促活動報表（含多入拆解、小樣換算每 ml/單入單價），同時比對 **momo、PChome、Yahoo"
+    " 購物中心**！"
 )
 
-# 模擬真實台灣手機瀏覽器請求
 MOMO_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X)"
@@ -80,7 +79,6 @@ def parse_specification(main_item_str, product_name):
 
 
 def extract_core_keywords(product_name):
-  """去除電視購物爆殺/專案字眼，保留乾淨品牌型號關鍵字"""
   clean = re.sub(
       r"(雙11|爆殺組|回饋組|熱燃強化組|黃金三效|特惠組|專案|搶購組|主商品：?|【.*?】|\[.*?\])",
       "",
@@ -89,17 +87,15 @@ def extract_core_keywords(product_name):
   return clean.strip()
 
 
-def search_momo(keyword):
-  """強效版 momo 搜尋：支援 Next.js 內嵌資料與 HTML 解析"""
+def search_momo(keyword, target_unit):
+  """搜尋 momo 購物網"""
   encoded_kw = urllib.parse.quote(keyword)
   url = f"https://m.momoshop.com.tw/search.momo?searchKeyword={encoded_kw}&_advFirst=N&_advCp=N&curPage=1&searchType=1"
   results = []
-
   session = requests.Session()
   try:
     res = session.get(url, headers=MOMO_HEADERS, timeout=8)
     if res.status_code == 200:
-      # 方法 A：嘗試從頁面內嵌的 JSON 抓取（最精準）
       match_json = re.search(
           r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
           res.text,
@@ -107,243 +103,4 @@ def search_momo(keyword):
       if match_json:
         try:
           data = json.loads(match_json.group(1))
-          prods = (
-              data.get("props", {})
-              .get("pageProps", {})
-              .get("goodsInfo", {})
-              .get("goodsList", [])
-          )
-          for p in prods[:6]:
-            p_name = p.get("goodsName", "")
-            p_price = float(p.get("salePrice") or p.get("price", 0))
-            if p_name and p_price > 0:
-              spec = parse_specification("", p_name)
-              unit_price = (
-                  round(p_price / spec["total_volume"], 2)
-                  if spec["total_volume"] > 0
-                  else p_price
-              )
-              results.append({
-                  "platform": "momo",
-                  "title": p_name,
-                  "price": p_price,
-                  "unit_price": unit_price,
-                  "unit": spec["unit"],
-                  "url": (
-                      f"https://m.momoshop.com.tw/goods.momo?i_code={p.get('goodsCode')}"
-                  ),
-              })
-        except Exception:
-          pass
-
-      # 方法 B：若無 JSON 則走常規 HTML 解析
-      if not results:
-        soup = BeautifulSoup(res.text, "html.parser")
-        items = (
-            soup.select("li.goodsItemLi")
-            or soup.select(".prdList li")
-            or soup.select("article.prdItem")
-        )
-        for item in items[:6]:
-          title_el = (
-              item.select_one(".prdName")
-              or item.select_one(".goodsName")
-              or item.select_one("h3")
-          )
-          price_el = (
-              item.select_one(".price")
-              or item.select_one(".prdPrice")
-              or item.select_one("b")
-          )
-          link_el = item.select_one("a")
-
-          if title_el and price_el:
-            p_name = title_el.text.strip()
-            price_match = re.search(r"[\d,]+", price_el.text)
-            if price_match:
-              p_price = float(price_match.group(0).replace(",", ""))
-              spec = parse_specification("", p_name)
-              unit_price = (
-                  round(p_price / spec["total_volume"], 2)
-                  if spec["total_volume"] > 0
-                  else p_price
-              )
-              item_url = ""
-              if link_el and link_el.get("href"):
-                href = link_el["href"]
-                item_url = (
-                    href
-                    if href.startswith("http")
-                    else f"https://m.momoshop.com.tw/{href.lstrip('/')}"
-                )
-
-              results.append({
-                  "platform": "momo",
-                  "title": p_name,
-                  "price": p_price,
-                  "unit_price": unit_price,
-                  "unit": spec["unit"],
-                  "url": item_url,
-              })
-  except Exception:
-    pass
-  return results
-
-
-def search_pchome(keyword):
-  """備用比價：PChome 24h"""
-  url = f"https://ecshweb.pchome.com.tw/search/v3.3/all/results?q={urllib.parse.quote(keyword)}&page=1&sort=rnk/dc"
-  results = []
-  try:
-    res = requests.get(url, headers=PC_HEADERS, timeout=6)
-    if res.status_code == 200:
-      data = res.json()
-      prods = data.get("prods", [])
-      for p in prods[:4]:
-        p_name = p.get("name", "")
-        p_price = float(p.get("price", 0))
-        spec = parse_specification("", p_name)
-        unit_price = (
-            round(p_price / spec["total_volume"], 2)
-            if spec["total_volume"] > 0
-            else p_price
-        )
-        results.append({
-            "platform": "PChome",
-            "title": p_name,
-            "price": p_price,
-            "unit_price": unit_price,
-            "unit": spec["unit"],
-            "url": f"https://24h.pchome.com.tw/prod/{p.get('Id')}",
-        })
-  except Exception:
-    pass
-  return results
-
-
-# -----------------------------
-# 頁面主體邏輯
-# -----------------------------
-
-uploaded_file = st.file_uploader(
-    "請上傳 Excel 活動排程清單 (.xlsx)", type=["xlsx"]
-)
-
-if uploaded_file is not None:
-  wb = openpyxl.load_workbook(uploaded_file, data_only=True)
-  sheet_names = wb.sheetnames
-
-  st.success(f"檔案上傳成功！偵測到工作表：{', '.join(sheet_names)}")
-
-  default_sheets = [s for s in sheet_names if "支" in s or "sheet" in s]
-  selected_sheets = st.multiselect(
-      "請勾選欲進行比價的工作表：",
-      options=sheet_names,
-      default=default_sheets if default_sheets else [sheet_names[0]],
-  )
-
-  if st.button("🚀 開始自動比價換算（優先對標 momo）", type="primary"):
-    all_results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    items_to_process = []
-    for sname in selected_sheets:
-      df = pd.read_excel(uploaded_file, sheet_name=sname)
-      if "品名" not in df.columns:
-        continue
-      df_valid = df.dropna(subset=["品名"])
-      for _, row in df_valid.iterrows():
-        pname = str(row.get("品名", "")).strip()
-        price = row.get("東森價", 0)
-        main_item = (
-            str(row.get("主商品(含型號)", ""))
-            if pd.notna(row.get("主商品(含型號)"))
-            else ""
-        )
-        if pname and pd.notna(price) and float(price) > 0:
-          items_to_process.append({
-              "sheet": sname,
-              "品名": pname,
-              "主商品": main_item,
-              "東森價": float(price),
-          })
-
-    total_count = len(items_to_process)
-    if total_count == 0:
-      st.warning("所選工作表中未找到有效的品名與價格！")
-    else:
-      for idx, item in enumerate(items_to_process):
-        status_text.text(
-            f"正在比價 ({idx+1}/{total_count}): 【{item['品名']}】..."
-        )
-
-        spec = parse_specification(item["主商品"], item["品名"])
-        vol = spec["total_volume"]
-        unit = spec["unit"]
-        unit_price = round(item["東森價"] / vol, 2) if vol > 0 else item["東森價"]
-
-        kw = extract_core_keywords(item["品名"])
-
-        # 優先搜尋 momo
-        momo_items = search_momo(kw)
-        pchome_items = search_pchome(kw)
-
-        # 挑選單位符合的競品
-        momo_matched = [c for c in momo_items if c["unit"] == unit]
-        pchome_matched = [c for c in pchome_items if c["unit"] == unit]
-
-        # 核心對標邏輯：若 momo 有貨，以 momo 換算單價最低者為準；momo 沒賣才退回 PChome
-        target_comp = None
-        if momo_matched:
-          target_comp = min(momo_matched, key=lambda x: x["unit_price"])
-        elif pchome_matched:
-          target_comp = min(pchome_matched, key=lambda x: x["unit_price"])
-
-        advantage = "-"
-        if target_comp and target_comp["unit_price"] > 0:
-          diff = (
-              (target_comp["unit_price"] - unit_price)
-              / target_comp["unit_price"]
-          ) * 100
-          advantage = (
-              f"比競業便宜 {round(diff, 1)}%"
-              if diff > 0
-              else f"比競業貴 {round(abs(diff), 1)}%"
-          )
-
-        all_results.append({
-            "來源工作表": item["sheet"],
-            "本台品名": item["品名"],
-            "主商品規格": item["主商品"],
-            "本台售價": item["東森價"],
-            "換算總量": f"{vol} {unit}",
-            "本台換算單價": f"{unit_price} 元/{unit}",
-            "競業平台": target_comp["platform"] if target_comp else "查無同單位商品",
-            "競業品名": target_comp["title"] if target_comp else "-",
-            "競業售價": target_comp["price"] if target_comp else "-",
-            "競業換算單價": (
-                f"{target_comp['unit_price']} 元/{unit}" if target_comp else "-"
-            ),
-            "價差優勢": advantage,
-            "競品參考連結": target_comp["url"] if target_comp else "-",
-        })
-
-        progress_bar.progress((idx + 1) / total_count)
-        time.sleep(1.2)  # 保持適當間隔，維護連線穩定
-
-      status_text.text("比價完成！")
-      result_df = pd.DataFrame(all_results)
-      st.dataframe(result_df)
-
-      output = io.BytesIO()
-      with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        result_df.to_excel(writer, index=False, sheet_name="競業比價結果")
-      output.seek(0)
-
-      st.download_button(
-          label="📥 下載比價結果分析報表 (.xlsx)",
-          data=output,
-          file_name="雙11商品競業單入比價分析表.xlsx",
-          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      )
+          prods =
