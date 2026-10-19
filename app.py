@@ -1,4 +1,5 @@
 import io
+import json
 import re
 import time
 import urllib.parse
@@ -9,15 +10,31 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="電商競業單入比價工具", page_icon="🛒", layout="wide"
+    page_title="momo 競業單入比價工具", page_icon="🛒", layout="wide"
 )
 
-st.title("🛒 電商商品批次競業單入比價工具")
+st.title("🛒 電商商品批次比價工具（以 momo 為主）")
 st.markdown(
-    "支援大促活動報表（含多入拆解、小樣換算每 ml/單入單價），一鍵自動比價並產出分析報表。"
+    "專為 MD / 活動排程打造：支援多入組合拆解、每 ml/單入單價換算，優先比對"
+    " momo 購物網即時售價！"
 )
 
-HEADERS = {
+# 模擬真實台灣手機瀏覽器請求
+MOMO_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X)"
+        " AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148"
+        " Safari/604.1"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://m.momoshop.com.tw/",
+    "Connection": "keep-alive",
+}
+
+PC_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
         " like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -26,7 +43,9 @@ HEADERS = {
 
 
 def parse_specification(main_item_str, product_name):
+  """解析容量與入數，換算為單一計量單位 (ml, g, 錠, 入等)"""
   text = f"{product_name} {main_item_str or ''}"
+
   multi_pack = re.search(
       r"(\d+(?:\.\d+)?)\s*(ml|g|公克|錠|包|片|盒|入)[\*xX×](\d+)", text
   )
@@ -61,6 +80,7 @@ def parse_specification(main_item_str, product_name):
 
 
 def extract_core_keywords(product_name):
+  """去除電視購物爆殺/專案字眼，保留乾淨品牌型號關鍵字"""
   clean = re.sub(
       r"(雙11|爆殺組|回饋組|熱燃強化組|黃金三效|特惠組|專案|搶購組|主商品：?|【.*?】|\[.*?\])",
       "",
@@ -69,11 +89,113 @@ def extract_core_keywords(product_name):
   return clean.strip()
 
 
+def search_momo(keyword):
+  """強效版 momo 搜尋：支援 Next.js 內嵌資料與 HTML 解析"""
+  encoded_kw = urllib.parse.quote(keyword)
+  url = f"https://m.momoshop.com.tw/search.momo?searchKeyword={encoded_kw}&_advFirst=N&_advCp=N&curPage=1&searchType=1"
+  results = []
+
+  session = requests.Session()
+  try:
+    res = session.get(url, headers=MOMO_HEADERS, timeout=8)
+    if res.status_code == 200:
+      # 方法 A：嘗試從頁面內嵌的 JSON 抓取（最精準）
+      match_json = re.search(
+          r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+          res.text,
+      )
+      if match_json:
+        try:
+          data = json.loads(match_json.group(1))
+          prods = (
+              data.get("props", {})
+              .get("pageProps", {})
+              .get("goodsInfo", {})
+              .get("goodsList", [])
+          )
+          for p in prods[:6]:
+            p_name = p.get("goodsName", "")
+            p_price = float(p.get("salePrice") or p.get("price", 0))
+            if p_name and p_price > 0:
+              spec = parse_specification("", p_name)
+              unit_price = (
+                  round(p_price / spec["total_volume"], 2)
+                  if spec["total_volume"] > 0
+                  else p_price
+              )
+              results.append({
+                  "platform": "momo",
+                  "title": p_name,
+                  "price": p_price,
+                  "unit_price": unit_price,
+                  "unit": spec["unit"],
+                  "url": (
+                      f"https://m.momoshop.com.tw/goods.momo?i_code={p.get('goodsCode')}"
+                  ),
+              })
+        except Exception:
+          pass
+
+      # 方法 B：若無 JSON 則走常規 HTML 解析
+      if not results:
+        soup = BeautifulSoup(res.text, "html.parser")
+        items = (
+            soup.select("li.goodsItemLi")
+            or soup.select(".prdList li")
+            or soup.select("article.prdItem")
+        )
+        for item in items[:6]:
+          title_el = (
+              item.select_one(".prdName")
+              or item.select_one(".goodsName")
+              or item.select_one("h3")
+          )
+          price_el = (
+              item.select_one(".price")
+              or item.select_one(".prdPrice")
+              or item.select_one("b")
+          )
+          link_el = item.select_one("a")
+
+          if title_el and price_el:
+            p_name = title_el.text.strip()
+            price_match = re.search(r"[\d,]+", price_el.text)
+            if price_match:
+              p_price = float(price_match.group(0).replace(",", ""))
+              spec = parse_specification("", p_name)
+              unit_price = (
+                  round(p_price / spec["total_volume"], 2)
+                  if spec["total_volume"] > 0
+                  else p_price
+              )
+              item_url = ""
+              if link_el and link_el.get("href"):
+                href = link_el["href"]
+                item_url = (
+                    href
+                    if href.startswith("http")
+                    else f"https://m.momoshop.com.tw/{href.lstrip('/')}"
+                )
+
+              results.append({
+                  "platform": "momo",
+                  "title": p_name,
+                  "price": p_price,
+                  "unit_price": unit_price,
+                  "unit": spec["unit"],
+                  "url": item_url,
+              })
+  except Exception:
+    pass
+  return results
+
+
 def search_pchome(keyword):
+  """備用比價：PChome 24h"""
   url = f"https://ecshweb.pchome.com.tw/search/v3.3/all/results?q={urllib.parse.quote(keyword)}&page=1&sort=rnk/dc"
   results = []
   try:
-    res = requests.get(url, headers=HEADERS, timeout=6)
+    res = requests.get(url, headers=PC_HEADERS, timeout=6)
     if res.status_code == 200:
       data = res.json()
       prods = data.get("prods", [])
@@ -99,46 +221,9 @@ def search_pchome(keyword):
   return results
 
 
-def search_momo(keyword):
-  url = f"https://m.momoshop.com.tw/search.momo?searchKeyword={urllib.parse.quote(keyword)}"
-  results = []
-  try:
-    res = requests.get(url, headers=HEADERS, timeout=6)
-    if res.status_code == 200:
-      soup = BeautifulSoup(res.text, "html.parser")
-      items = soup.select("li.goodsItemLi") or soup.select(".prdList li")
-      for item in items[:4]:
-        title_el = item.select_one(".prdName") or item.select_one(".goodsName")
-        price_el = item.select_one(".price") or item.select_one(".prdPrice")
-        link_el = item.select_one("a")
-        if title_el and price_el:
-          p_name = title_el.text.strip()
-          price_match = re.search(r"[\d,]+", price_el.text)
-          if price_match:
-            p_price = float(price_match.group(0).replace(",", ""))
-            spec = parse_specification("", p_name)
-            unit_price = (
-                round(p_price / spec["total_volume"], 2)
-                if spec["total_volume"] > 0
-                else p_price
-            )
-            item_url = (
-                f"https://m.momoshop.com.tw/{link_el['href']}"
-                if link_el and link_el.get("href")
-                else ""
-            )
-            results.append({
-                "platform": "momo",
-                "title": p_name,
-                "price": p_price,
-                "unit_price": unit_price,
-                "unit": spec["unit"],
-                "url": item_url,
-            })
-  except Exception:
-    pass
-  return results
-
+# -----------------------------
+# 頁面主體邏輯
+# -----------------------------
 
 uploaded_file = st.file_uploader(
     "請上傳 Excel 活動排程清單 (.xlsx)", type=["xlsx"]
@@ -157,7 +242,7 @@ if uploaded_file is not None:
       default=default_sheets if default_sheets else [sheet_names[0]],
   )
 
-  if st.button("🚀 開始自動比價換算", type="primary"):
+  if st.button("🚀 開始自動比價換算（優先對標 momo）", type="primary"):
     all_results = []
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -199,19 +284,27 @@ if uploaded_file is not None:
         unit_price = round(item["東森價"] / vol, 2) if vol > 0 else item["東森價"]
 
         kw = extract_core_keywords(item["品名"])
-        comp_candidates = []
-        comp_candidates.extend(search_pchome(kw))
-        comp_candidates.extend(search_momo(kw))
 
-        matched = [c for c in comp_candidates if c["unit"] == unit]
-        lowest = (
-            min(matched, key=lambda x: x["unit_price"]) if matched else None
-        )
+        # 優先搜尋 momo
+        momo_items = search_momo(kw)
+        pchome_items = search_pchome(kw)
+
+        # 挑選單位符合的競品
+        momo_matched = [c for c in momo_items if c["unit"] == unit]
+        pchome_matched = [c for c in pchome_items if c["unit"] == unit]
+
+        # 核心對標邏輯：若 momo 有貨，以 momo 換算單價最低者為準；momo 沒賣才退回 PChome
+        target_comp = None
+        if momo_matched:
+          target_comp = min(momo_matched, key=lambda x: x["unit_price"])
+        elif pchome_matched:
+          target_comp = min(pchome_matched, key=lambda x: x["unit_price"])
 
         advantage = "-"
-        if lowest and lowest["unit_price"] > 0:
+        if target_comp and target_comp["unit_price"] > 0:
           diff = (
-              (lowest["unit_price"] - unit_price) / lowest["unit_price"]
+              (target_comp["unit_price"] - unit_price)
+              / target_comp["unit_price"]
           ) * 100
           advantage = (
               f"比競業便宜 {round(diff, 1)}%"
@@ -226,18 +319,18 @@ if uploaded_file is not None:
             "本台售價": item["東森價"],
             "換算總量": f"{vol} {unit}",
             "本台換算單價": f"{unit_price} 元/{unit}",
-            "競業最優平台": lowest["platform"] if lowest else "查無同單位商品",
-            "競業品名": lowest["title"] if lowest else "-",
-            "競業售價": lowest["price"] if lowest else "-",
+            "競業平台": target_comp["platform"] if target_comp else "查無同單位商品",
+            "競業品名": target_comp["title"] if target_comp else "-",
+            "競業售價": target_comp["price"] if target_comp else "-",
             "競業換算單價": (
-                f"{lowest['unit_price']} 元/{unit}" if lowest else "-"
+                f"{target_comp['unit_price']} 元/{unit}" if target_comp else "-"
             ),
             "價差優勢": advantage,
-            "競品參考連結": lowest["url"] if lowest else "-",
+            "競品參考連結": target_comp["url"] if target_comp else "-",
         })
 
         progress_bar.progress((idx + 1) / total_count)
-        time.sleep(1)
+        time.sleep(1.2)  # 保持適當間隔，維護連線穩定
 
       status_text.text("比價完成！")
       result_df = pd.DataFrame(all_results)
