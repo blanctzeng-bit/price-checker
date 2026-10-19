@@ -4,7 +4,6 @@ import re
 import time
 import urllib.parse
 from bs4 import BeautifulSoup
-import openpyxl
 import pandas as pd
 import requests
 import streamlit as st
@@ -42,9 +41,7 @@ PC_HEADERS = {
 
 
 def parse_specification(main_item_str, product_name):
-  """解析容量與入數，換算為單一計量單位 (ml, g, 錠, 入等)"""
   text = f"{product_name} {main_item_str or ''}"
-
   multi_pack = re.search(
       r"(\d+(?:\.\d+)?)\s*(ml|g|公克|錠|包|片|盒|入)[\*xX×](\d+)", text
   )
@@ -88,7 +85,6 @@ def extract_core_keywords(product_name):
 
 
 def search_momo(keyword, target_unit):
-  """搜尋 momo 購物網"""
   encoded_kw = urllib.parse.quote(keyword)
   url = f"https://m.momoshop.com.tw/search.momo?searchKeyword={encoded_kw}&_advFirst=N&_advCp=N&curPage=1&searchType=1"
   results = []
@@ -183,7 +179,6 @@ def search_momo(keyword, target_unit):
 
 
 def search_pchome(keyword, target_unit):
-  """搜尋 PChome 24h"""
   url = f"https://ecshweb.pchome.com.tw/search/v3.3/all/results?q={urllib.parse.quote(keyword)}&page=1&sort=rnk/dc"
   results = []
   try:
@@ -213,7 +208,6 @@ def search_pchome(keyword, target_unit):
 
 
 def search_yahoo(keyword, target_unit):
-  """搜尋 Yahoo 購物中心"""
   url = f"https://tw.buy.yahoo.com/search/product?p={urllib.parse.quote(keyword)}"
   results = []
   try:
@@ -271,3 +265,100 @@ def search_yahoo(keyword, target_unit):
 uploaded_file = st.file_uploader(
     "請上傳 Excel 活動排程清單 (.xlsx)", type=["xlsx"]
 )
+
+if uploaded_file is not None:
+  # 改用極速 Pandas 讀取工作表名稱，完全略過圖片與樣式，保證不卡死
+  try:
+    xl = pd.ExcelFile(uploaded_file)
+    sheet_names = xl.sheet_names
+    st.success(f"檔案解析成功！共有 {len(sheet_names)} 個工作表")
+  except Exception as e:
+    st.error(f"檔案讀取失敗：{e}")
+    sheet_names = []
+
+  if sheet_names:
+    default_sheets = [s for s in sheet_names if "支" in s or "sheet" in s]
+    selected_sheets = st.multiselect(
+        "請勾選欲進行比價的工作表：",
+        options=sheet_names,
+        default=default_sheets if default_sheets else [sheet_names[0]],
+    )
+
+    if st.button("🚀 開始自動跨平台比價（momo / PChome / Yahoo）", type="primary"):
+      all_results = []
+      progress_bar = st.progress(0)
+      status_text = st.empty()
+
+      items_to_process = []
+      for sname in selected_sheets:
+        try:
+          df = pd.read_excel(uploaded_file, sheet_name=sname)
+          if "品名" not in df.columns:
+            continue
+          df_valid = df.dropna(subset=["品名"])
+          for _, row in df_valid.iterrows():
+            pname = str(row.get("品名", "")).strip()
+            price = row.get("東森價", 0)
+            main_item = (
+                str(row.get("主商品(含型號)", ""))
+                if pd.notna(row.get("主商品(含型號)"))
+                else ""
+            )
+            if pname and pd.notna(price) and float(price) > 0:
+              items_to_process.append({
+                  "sheet": sname,
+                  "品名": pname,
+                  "主商品": main_item,
+                  "東森價": float(price),
+              })
+        except Exception:
+          pass
+
+      total_count = len(items_to_process)
+      if total_count == 0:
+        st.warning("所選工作表中未找到有效的品名與價格！")
+      else:
+        for idx, item in enumerate(items_to_process):
+          status_text.text(
+              f"正在比價 ({idx+1}/{total_count}): 【{item['品名']}】..."
+          )
+
+          spec = parse_specification(item["主商品"], item["品名"])
+          vol = spec["total_volume"]
+          unit = spec["unit"]
+          unit_price = (
+              round(item["東森價"] / vol, 2) if vol > 0 else item["東森價"]
+          )
+
+          kw = extract_core_keywords(item["品名"])
+
+          best_momo = search_momo(kw, unit)
+          best_pchome = search_pchome(kw, unit)
+          best_yahoo = search_yahoo(kw, unit)
+
+          valid_comps = []
+          if best_momo:
+            valid_comps.append((
+                "momo",
+                best_momo["unit_price"],
+                best_momo["price"],
+                best_momo["title"],
+            ))
+          if best_pchome:
+            valid_comps.append((
+                "PChome",
+                best_pchome["unit_price"],
+                best_pchome["price"],
+                best_pchome["title"],
+            ))
+          if best_yahoo:
+            valid_comps.append((
+                "Yahoo",
+                best_yahoo["unit_price"],
+                best_yahoo["price"],
+                best_yahoo["title"],
+            ))
+
+          lowest_platform = "-"
+          lowest_unit_price = None
+          advantage =
