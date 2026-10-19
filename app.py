@@ -41,47 +41,60 @@ PC_HEADERS = {
 
 
 def parse_specification(main_item_str, product_name):
+  """解析容量與多入數量，支援 20ml超值6入、600ml任選6入、18ml*3 等格式"""
   text = f"{product_name} {main_item_str or ''}"
-  multi_pack = re.search(
-      r"(\d+(?:\.\d+)?)\s*(ml|g|公克|錠|包|片|盒|入)[\*xX×](\d+)", text
+
+  # 1. 抓取單位容量 (如: 30ml, 20ml, 100ml, 600ml, 30錠, 5g)
+  vol_match = re.search(
+      r"(\d+(?:\.\d+)?)\s*(ml|g|公克|錠|包|片|盒|入)", text, re.IGNORECASE
   )
-  if multi_pack:
-    unit_size = float(multi_pack.group(1))
-    unit = multi_pack.group(2)
-    count = int(multi_pack.group(3))
-    return {
-        "unit_size": unit_size,
-        "unit": unit,
-        "count": count,
-        "total_volume": unit_size * count,
-    }
+  unit_size = float(vol_match.group(1)) if vol_match else 1.0
+  unit = vol_match.group(2).lower() if vol_match else "入"
+  if unit == "公克":
+    unit = "g"
 
-  single_pack = re.search(r"(\d+(?:\.\d+)?)\s*(ml|g|公克|錠|包|片|盒|入)", text)
-  if single_pack:
-    unit_size = float(single_pack.group(1))
-    unit = single_pack.group(2)
-    return {
-        "unit_size": unit_size,
-        "unit": unit,
-        "count": 1,
-        "total_volume": unit_size,
-    }
+  # 2. 抓取組裝入數 (支援 *6, x6, 超值6入, 任選6入, 5入組, 共4瓶 等)
+  count_match = re.search(
+      r"(?:[\*xX×]|超值|任選|共)?\s*(\d+)\s*(?:入組|入|盒|瓶|支|罐|包)", text
+  )
+  count = 1
+  if count_match:
+    count = int(count_match.group(1))
+  else:
+    star_match = re.search(r"[\*xX×]\s*(\d+)", text)
+    if star_match:
+      count = int(star_match.group(1))
 
-  count_only = re.search(r"[\*xX×](\d+)|(\d+)\s*入", text)
-  if count_only:
-    count = int(count_only.group(1) or count_only.group(2))
-    return {"unit_size": 1, "unit": "入", "count": count, "total_volume": count}
-
-  return {"unit_size": 1, "unit": "入", "count": 1, "total_volume": 1}
+  total_volume = unit_size * count
+  return {
+      "unit_size": unit_size,
+      "unit": unit,
+      "count": count,
+      "total_volume": total_volume,
+  }
 
 
 def extract_core_keywords(product_name):
-  clean = re.sub(
-      r"(雙11|爆殺組|回饋組|熱燃強化組|黃金三效|特惠組|專案|搶購組|主商品：?|【.*?】|\[.*?\])",
+  """清洗關鍵字：去除規格、入數及香味列舉，保留乾淨品名以利對標"""
+  # 移除破折號後面的香味/款式列舉 (例: -蘆薈/迷迭香/甜杏仁/橄欖)
+  name = re.sub(r"[-－—].*$", "", product_name)
+  # 移除規格與入數 (例: 600ml任選6入, 20ml超值6入, 100ml*4)
+  name = re.sub(
+      r"\d+(?:\.\d+)?\s*(?:ml|g|公克|錠|包|片|盒|入)?\s*(?:[\*xX×]|超值|任選|共)?\s*\d+\s*(?:入組|入|盒|瓶|支|罐|包)?",
       "",
-      product_name,
+      name,
+      flags=re.IGNORECASE,
   )
-  return clean.strip()
+  name = re.sub(
+      r"\d+(?:\.\d+)?\s*(?:ml|g|公克|錠|包|片|盒|入)", "", name, flags=re.IGNORECASE
+  )
+  # 移除活動字眼
+  name = re.sub(
+      r"(雙11|爆殺組|回饋組|熱燃強化組|黃金三效|特惠組|專案|搶購組|主商品：?|【.*?】|\[.*?\]|超值組|超值|任選|組)",
+      "",
+      name,
+  )
+  return name.strip()
 
 
 def search_momo(keyword, target_unit):
